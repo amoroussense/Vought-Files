@@ -425,6 +425,29 @@ async def add_carta(interaction: discord.Interaction, nome: str, categoria: str,
     conn.close()
     await interaction.response.send_message(f"✅ Adicionada!")
 
+@bot.tree.command(name="remover_carta", description="[ADMIN] Remove uma carta permanentemente do sistema.")
+async def remover_carta(interaction: discord.Interaction, codigo: int):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("❌ Apenas administradores podem remover cartas!", ephemeral=True)
+    
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    
+    # Verificar se a carta existe
+    c.execute("SELECT name FROM cards WHERE id = ?", (codigo,))
+    card = c.fetchone()
+    if not card:
+        conn.close()
+        return await interaction.response.send_message(f"❌ Carta com ID #{codigo} não encontrada.", ephemeral=True)
+    
+    # Remover a carta e limpar inventários
+    c.execute("DELETE FROM cards WHERE id = ?", (codigo,))
+    c.execute("DELETE FROM inventory WHERE card_id = ?", (codigo,))
+    
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"🗑️ A carta **{card[0]}** (ID #{codigo}) foi removida do sistema e de todos os inventários.")
+
 class ConfirmInteraction(discord.ui.View):
     def __init__(self, target, challenger):
         super().__init__(timeout=60)
