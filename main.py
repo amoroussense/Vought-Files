@@ -405,6 +405,36 @@ async def meuheroi(interaction: discord.Interaction, codigo: int):
     conn.close()
     await interaction.response.send_message(f"⭐ Favorito definido!")
 
+@bot.tree.command(name="descartar", description="Descarte uma carta do seu inventário.")
+async def descartar(interaction: discord.Interaction, codigo: int):
+    user_id = interaction.user.id
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    
+    # Verificar se o usuário possui a carta
+    c.execute("SELECT id, amount, is_evolved FROM inventory WHERE user_id = ? AND card_id = ?", (user_id, codigo))
+    items = c.fetchall()
+    
+    if not items:
+        conn.close()
+        return await interaction.response.send_message("❌ Você não possui essa carta no seu inventário!", ephemeral=True)
+    
+    # Prioriza descartar a normal se tiver as duas
+    target_item = next((i for i in items if i[2] == 0), items[0])
+
+    if target_item[1] > 1:
+        c.execute("UPDATE inventory SET amount = amount - 1 WHERE id = ?", (target_item[0],))
+    else:
+        c.execute("DELETE FROM inventory WHERE id = ?", (target_item[0],))
+    
+    c.execute("SELECT name FROM cards WHERE id = ?", (codigo,))
+    card_name = c.fetchone()[0]
+    conn.commit()
+    conn.close()
+    
+    status = "Coroada 👑" if target_item[2] == 1 else "Normal"
+    await interaction.response.send_message(f"🗑️ Você descartou 1 unidade de **{card_name}** ({status}).")
+
 @bot.tree.command(name="setgif", description="[ADMIN] Definir GIF de evolução.")
 async def setgif(interaction: discord.Interaction, codigo: int, url_gif: str):
     if not interaction.user.guild_permissions.administrator: return
