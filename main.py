@@ -318,8 +318,17 @@ async def carreira(interaction: discord.Interaction, membro: Optional[discord.Me
     embed.add_field(name=f"⚔️ Vitórias", value=str(user_data[9] or 0), inline=True)
     embed.add_field(name=f"{emojis[5]} Moedas", value=f"${user_data[8] or 0}", inline=True)
     
+     # Foto de Perfil Grande (Image)
     if user_data[11]: # custom_image
-        embed.set_thumbnail(url=user_data[11])
+        embed.set_image(url=user_data[11])
+    
+    # Carta Favorita Pequena (Thumbnail)
+    if user_data[2]: # favorite_card_id
+        c = sqlite3.connect('the_boys_bot.db').cursor()
+        c.execute("SELECT image_url FROM cards WHERE id = ?", (user_data[2],))
+        fav_img = c.fetchone()
+        if fav_img:
+            embed.set_thumbnail(url=fav_img[0])
     
     await interaction.response.send_message(embed=embed)
 
