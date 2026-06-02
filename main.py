@@ -5,8 +5,11 @@ import sqlite3
 import random
 import datetime
 import os
+import io
+import aiohttp
+from PIL import Image
 from dotenv import load_dotenv
-from typing import Optional, List
+from typing import Optional, List, Union
 
 # Carregar variáveis de ambiente
 load_dotenv()
@@ -17,6 +20,7 @@ class TheBoysBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.members = True # Necessário para alguns comandos sociais
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
@@ -30,458 +34,101 @@ def init_db():
     conn = sqlite3.connect('the_boys_bot.db')
     c = conn.cursor()
     
-    # Tabela de Usuários
+    # Usuários
     c.execute('''CREATE TABLE IF NOT EXISTS users 
                  (discord_id INTEGER PRIMARY KEY, 
                   team TEXT, 
                   favorite_card_id INTEGER,
+                  partner_id INTEGER, -- Pode ser ID de usuário ou ID de carta (negativo para carta)
+                  partner_type TEXT, -- 'user' ou 'card'
                   last_drop TEXT,
+                  last_salary TEXT,
+                  last_mystery TEXT,
+                  balance INTEGER DEFAULT 0,
+                  wins INTEGER DEFAULT 0,
                   custom_name TEXT,
                   custom_image TEXT,
-                  wins INTEGER DEFAULT 0)''')
+                  bio TEXT,
+                  embed_color TEXT DEFAULT '000000',
+                  aesthetic_id TEXT DEFAULT 'default')''')
     
-    # Tabela de Cartas
+    # Cartas
     c.execute('''CREATE TABLE IF NOT EXISTS cards 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   name TEXT, 
-                  category TEXT, 
+                  category TEXT, -- Normal, Comemorativa, Especial, Duo, Casal
                   tag TEXT, 
                   image_url TEXT,
                   evolved_image_url TEXT)''')
     
-    # Tabela de Inventário (Adicionado card_wins para rastrear vitórias daquela carta específica do usuário)
+    # Inventário
     c.execute('''CREATE TABLE IF NOT EXISTS inventory 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   user_id INTEGER, 
                   card_id INTEGER, 
                   amount INTEGER DEFAULT 1,
-                  is_evolved INTEGER DEFAULT 0,
-                  card_wins INTEGER DEFAULT 0,
-                  UNIQUE(user_id, card_id, is_evolved),
+                  level INTEGER DEFAULT 0, -- 0: Normal, 1: 1 Estrela, 2: 2 Estrelas, 3: 3 Estrelas, 4: Coroada
+                  frame_id INTEGER,
+                  UNIQUE(user_id, card_id, level),
                   FOREIGN KEY(user_id) REFERENCES users(discord_id),
                   FOREIGN KEY(card_id) REFERENCES cards(id))''')
+
+    # Loja (Shopping)
+    c.execute('''CREATE TABLE IF NOT EXISTS shop 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  item_type TEXT, -- 'aesthetic', 'frame', 'card'
+                  item_id TEXT, 
+                  name TEXT,
+                  price INTEGER)''')
+
+    # Estética (Aesthetics)
+    c.execute('''CREATE TABLE IF NOT EXISTS aesthetics 
+                 (id TEXT PRIMARY KEY, 
+                  name TEXT, 
+                  emojis TEXT)''') # Formato: emoji1,emoji2,emoji3...
+
+    # Molduras (Frames)
+    c.execute('''CREATE TABLE IF NOT EXISTS frames 
+                 (id INTEGER PRIMARY KEY, 
+                  name TEXT, 
+                  image_url TEXT)''')
+
+    # Receitas de Combinação (Duo/Casal)
+    c.execute('''CREATE TABLE IF NOT EXISTS recipes 
+                 (card_a_id INTEGER, 
+                  card_b_id INTEGER, 
+                  result_card_id INTEGER)''')
     
+    # Inventário de Cosméticos (Aesthetics/Frames comprados)
+    c.execute('''CREATE TABLE IF NOT EXISTS user_cosmetics 
+                 (user_id INTEGER, 
+                  item_type TEXT, 
+                  item_id TEXT)''')
+
+    # Inserir Estéticas Iniciais
+    aesthetics_data = [
+        ('soft', 'Soft', '💭,🍨,🍰,🎀,✨️,🧸'),
+        ('dark', 'Dark', '🩸,🕯️,🦇,🍷,🖤,🕸️'),
+        ('cottage', 'Cottage', '🌳,📚,👒,🌷,🌷,🧺'),
+        ('sweet', 'Sweet', ' waffle,🍩,🍮,🍨,🍫,🍯'),
+        ('zoo', 'Zoo', '🐶,🐰,🐱,🐹,🐻,🦊'),
+        ('default', 'Padrão', '👤,📊,🏆,🏢,⭐,💰')
+    ]
+    c.executemany("INSERT OR IGNORE INTO aesthetics (id, name, emojis) VALUES (?, ?, ?)", aesthetics_data)
+
     conn.commit()
     conn.close()
 
 init_db()
 
-# --- FUNÇÕES AUXILIARES ---
-def get_user_db(user_id):
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE discord_id = ?", (user_id,))
-    user = c.fetchone()
-    if not user:
-        c.execute("INSERT INTO users (discord_id) VALUES (?)", (user_id,))
-        conn.commit()
-        c.execute("SELECT * FROM users WHERE discord_id = ?", (user_id,))
-        user = c.fetchone()
-    conn.close()
-    return user
-
-def get_ranking_pos(user_id):
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    c.execute('''SELECT user_id, SUM(amount) as total FROM inventory 
-                 GROUP BY user_id ORDER BY total DESC''')
-    ranking = c.fetchall()
-    conn.close()
-    for idx, row in enumerate(ranking):
-        if row[0] == user_id:
-            return idx + 1
-    return "N/A"
-
-# --- COMANDOS PÚBLICOS ---
-
-@bot.tree.command(name="recrutar", description="Recrute um novo membro para sua equipe! (A cada 10 min)")
-async def recrutar(interaction: discord.Interaction):
-    user_id = interaction.user.id
-    user_data = get_user_db(user_id)
-    
-    now = datetime.datetime.now()
-    if user_data[3]: # last_drop
-        last_drop = datetime.datetime.fromisoformat(user_data[3])
-        diff = (now - last_drop).total_seconds()
-        if diff < 600:
-            wait_time = int((600 - diff) / 60)
-            return await interaction.response.send_message(f"🚫 Você precisa esperar {wait_time} minutos para recrutar novamente.", ephemeral=True)
-
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    c.execute("SELECT * FROM cards ORDER BY RANDOM() LIMIT 1")
-    card = c.fetchone()
-    
-    if not card:
-        conn.close()
-        return await interaction.response.send_message("Nenhuma carta disponível no sistema ainda!", ephemeral=True)
-    
-    # Adicionar ao inventário
-    c.execute("INSERT INTO inventory (user_id, card_id, amount, is_evolved) VALUES (?, ?, 1, 0) ON CONFLICT(user_id, card_id, is_evolved) DO UPDATE SET amount = amount + 1", (user_id, card[0]))
-    c.execute("UPDATE users SET last_drop = ? WHERE discord_id = ?", (now.isoformat(), user_id))
-    conn.commit()
-    conn.close()
-    
-    embed = discord.Embed(title="🎖️ Novo Recruta Encontrado!", color=discord.Color.red())
-    embed.add_field(name="Nome", value=card[1], inline=True)
-    embed.add_field(name="Categoria", value=card[2], inline=True)
-    embed.add_field(name="Time", value=card[3], inline=True)
-    embed.set_image(url=card[4])
-    embed.set_footer(text=f"ID da Carta: {card[0]}")
-    
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="agencia", description="Veja todos os seus recrutas na Agência.")
-async def agencia(interaction: discord.Interaction):
-    user_id = interaction.user.id
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    c.execute('''SELECT cards.id, cards.name, cards.tag, inventory.amount, inventory.is_evolved 
-                 FROM inventory 
-                 JOIN cards ON inventory.card_id = cards.id 
-                 WHERE inventory.user_id = ?''', (user_id,))
-    items = c.fetchall()
-    conn.close()
-    
-    if not items:
-        return await interaction.response.send_message("Sua agência está vazia. Use `/recrutar`!", ephemeral=True)
-    
-    desc = "\n".join([f"`#{item[0]}` **{item[1]}** {'👑' if item[4] else ''} [{item[2]}] - x{item[3]}" for item in items])
-    embed = discord.Embed(title=f"🏢 Agência de {interaction.user.name}", description=desc, color=discord.Color.dark_grey())
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="carreira", description="Veja seu perfil de carreira.")
-async def carreira(interaction: discord.Interaction):
-    user_id = interaction.user.id
-    user_data = get_user_db(user_id)
-    
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    c.execute("SELECT SUM(amount) FROM inventory WHERE user_id = ?", (user_id,))
-    total_cards = c.fetchone()[0] or 0
-    
-    fav_card = None
-    if user_data[2]: # favorite_card_id
-        c.execute("SELECT name, image_url, evolved_image_url FROM cards WHERE id = ?", (user_data[2],))
-        fav_card = c.fetchone()
-        c.execute("SELECT is_evolved FROM inventory WHERE user_id = ? AND card_id = ? AND is_evolved = 1", (user_id, user_data[2]))
-        is_fav_evolved = c.fetchone()
-    conn.close()
-    
-    ranking = get_ranking_pos(user_id)
-    display_name = user_data[4] or interaction.user.name
-    
-    embed = discord.Embed(title=f"📁 Dossier: {display_name}", color=discord.Color.blue())
-    embed.add_field(name="Time", value=user_data[1] or "Nenhum", inline=True)
-    embed.add_field(name="Total de Cartas", value=str(total_cards), inline=True)
-    embed.add_field(name="Ranking", value=f"#{ranking}", inline=True)
-    embed.add_field(name="🏅 Batalhas Ganhas", value=str(user_data[6] or 0), inline=True)
-    
-    if fav_card:
-        name_display = f"{fav_card[0]} 👑" if (is_fav_evolved and fav_card[2]) else fav_card[0]
-        img_display = fav_card[2] if (is_fav_evolved and fav_card[2]) else fav_card[1]
-        embed.add_field(name="⭐ Herói Favorito", value=name_display, inline=False)
-        embed.set_thumbnail(url=img_display)
-    
-    if user_data[5]: # custom_image
-        embed.set_image(url=user_data[5])
-    
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="admirar", description="Veja detalhes de uma carta específica.")
-async def admirar(interaction: discord.Interaction, codigo: int):
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    
-    # Buscar dados da carta
-    c.execute("SELECT name, category, tag, image_url, evolved_image_url FROM cards WHERE id = ?", (codigo,))
-    card = c.fetchone()
-    
-    if not card:
-        conn.close()
-        return await interaction.response.send_message("❌ Carta não encontrada!", ephemeral=True)
-    
-    # Verificar se o usuário possui a carta
-    c.execute("SELECT amount, card_wins, is_evolved FROM inventory WHERE user_id = ? AND card_id = ?", (interaction.user.id, codigo))
-    inv_data = c.fetchall() # Pode ter versão normal e evoluída
-    conn.close()
-    
-    embed = discord.Embed(title=f"🔍 Admirando: {card[0]}", color=discord.Color.purple())
-    embed.add_field(name="Categoria", value=card[1], inline=True)
-    embed.add_field(name="Time", value=card[2], inline=True)
-    
-    if inv_data:
-        total_qnt = sum(item[0] for item in inv_data)
-        total_wins = sum(item[1] for item in inv_data)
-        has_evolved = any(item[2] == 1 for item in inv_data)
-        
-        status_text = f"Você possui **{total_qnt}** unidades.\nVitórias com esta carta: **{total_wins}** 🏅"
-        if has_evolved:
-            status_text += "\n✨ Você possui a versão **Coroada**!"
-        embed.add_field(name="Seu Status", value=status_text, inline=False)
-        
-        # Mostrar imagem evoluída se ele tiver a evoluída, senão a normal
-        img_to_show = card[4] if (has_evolved and card[4]) else card[3]
-        embed.set_image(url=img_to_show)
-    else:
-        embed.add_field(name="Seu Status", value="Você ainda não recrutou este membro.", inline=False)
-        embed.set_image(url=card[3])
-    
-    embed.set_footer(text=f"ID: #{codigo}")
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="upar", description="Evolua uma carta (Gasta 50 unidades da mesma carta).")
-async def upar(interaction: discord.Interaction, codigo: int):
-    user_id = interaction.user.id
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    
-    c.execute("SELECT id, amount FROM inventory WHERE user_id = ? AND card_id = ? AND is_evolved = 0", (user_id, codigo))
-    inv_item = c.fetchone()
-    
-    if not inv_item or inv_item[1] < 50:
-        conn.close()
-        return await interaction.response.send_message("❌ Você precisa de pelo menos 50 unidades dessa carta para upar!", ephemeral=True)
-    
-    c.execute("SELECT name, evolved_image_url FROM cards WHERE id = ?", (codigo,))
-    card_info = c.fetchone()
-    if not card_info[1]:
-        conn.close()
-        return await interaction.response.send_message("❌ Esta carta ainda não possui uma versão 'Coroada' (GIF) disponível.", ephemeral=True)
-
-    if inv_item[1] == 50:
-        c.execute("DELETE FROM inventory WHERE id = ?", (inv_item[0],))
-    else:
-        c.execute("UPDATE inventory SET amount = amount - 50 WHERE id = ?", (inv_item[0],))
-    
-    c.execute("INSERT INTO inventory (user_id, card_id, amount, is_evolved) VALUES (?, ?, 1, 1) ON CONFLICT(user_id, card_id, is_evolved) DO UPDATE SET amount = amount + 1", (user_id, codigo))
-    
-    conn.commit()
-    conn.close()
-    
-    embed = discord.Embed(title="👑 EVOLUÇÃO CONCLUÍDA!", description=f"Sua carta **{card_info[0]}** agora é uma versão Coroada!", color=discord.Color.gold())
-    embed.set_image(url=card_info[1])
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="batalhar", description="Desafie alguém para uma batalha de cartas!")
-async def batalhar(interaction: discord.Interaction, oponente: discord.Member, codigo_sua_carta: int):
-    user_id = interaction.user.id
-    if oponente.id == user_id:
-        return await interaction.response.send_message("❌ Você não pode lutar contra si mesmo!", ephemeral=True)
-
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    c.execute("SELECT is_evolved FROM inventory WHERE user_id = ? AND card_id = ? AND amount > 0", (user_id, codigo_sua_carta))
-    inv_item = c.fetchone()
-    if not inv_item:
-        conn.close()
-        return await interaction.response.send_message("❌ Você não possui essa carta!", ephemeral=True)
-    is_evolved = inv_item[0]
-    conn.close()
-
-    view = ConfirmInteraction(oponente, interaction.user)
-    await interaction.response.send_message(f"⚔️ {oponente.mention}, {interaction.user.mention} te desafiou para uma batalha usando a carta #{codigo_sua_carta}! Você aceita?", view=view)
-    
-    await view.wait()
-    if view.value is True:
-        vencedor = random.choice([interaction.user, oponente])
-        perdedor = oponente if vencedor == interaction.user else interaction.user
-        
-        conn = sqlite3.connect('the_boys_bot.db')
-        c = conn.cursor()
-        # Atualizar vitórias do usuário
-        c.execute("UPDATE users SET wins = wins + 1 WHERE discord_id = ?", (vencedor.id,))
-        # Atualizar vitórias da CARTA (se o vencedor foi quem iniciou e usou a carta)
-        if vencedor == interaction.user:
-            c.execute("UPDATE inventory SET card_wins = card_wins + 1 WHERE user_id = ? AND card_id = ? AND is_evolved = ?", (user_id, codigo_sua_carta, is_evolved))
-        
-        conn.commit()
-        conn.close()
-        await interaction.followup.send(f"🏆 A batalha terminou! **{vencedor.name}** venceu o combate!")
-    else:
-        await interaction.followup.send(f"🏳️ O desafio foi recusado ou expirou.")
-
-@bot.tree.command(name="trocar", description="Troque uma carta com outro membro.")
-async def trocar(interaction: discord.Interaction, oponente: discord.Member, sua_carta_id: int, carta_dele_id: int):
-    user_id = interaction.user.id
-    if oponente.id == user_id:
-        return await interaction.response.send_message("❌ Você não pode trocar consigo mesmo!", ephemeral=True)
-
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    c.execute("SELECT id FROM inventory WHERE user_id = ? AND card_id = ? AND amount > 0", (user_id, sua_carta_id))
-    if not c.fetchone():
-        conn.close()
-        return await interaction.response.send_message(f"❌ Você não possui a carta #{sua_carta_id}!", ephemeral=True)
-    
-    c.execute("SELECT id FROM inventory WHERE user_id = ? AND card_id = ? AND amount > 0", (oponente.id, carta_dele_id))
-    if not c.fetchone():
-        conn.close()
-        return await interaction.response.send_message(f"❌ {oponente.name} não possui a carta #{carta_dele_id}!", ephemeral=True)
-    conn.close()
-
-    view = ConfirmInteraction(oponente, interaction.user)
-    await interaction.response.send_message(f"🤝 {oponente.mention}, {interaction.user.mention} quer trocar a carta #{sua_carta_id} pela sua #{carta_dele_id}. Aceita?", view=view)
-    
-    await view.wait()
-    if view.value is True:
-        conn = sqlite3.connect('the_boys_bot.db')
-        c = conn.cursor()
-        c.execute("UPDATE inventory SET amount = amount - 1 WHERE user_id = ? AND card_id = ?", (user_id, sua_carta_id))
-        c.execute("INSERT INTO inventory (user_id, card_id, amount) VALUES (?, ?, 1) ON CONFLICT(user_id, card_id, is_evolved) DO UPDATE SET amount = amount + 1", (user_id, carta_dele_id))
-        c.execute("UPDATE inventory SET amount = amount - 1 WHERE user_id = ? AND card_id = ?", (oponente.id, carta_dele_id))
-        c.execute("INSERT INTO inventory (user_id, card_id, amount) VALUES (?, ?, 1) ON CONFLICT(user_id, card_id, is_evolved) DO UPDATE SET amount = amount + 1", (oponente.id, sua_carta_id))
-        c.execute("DELETE FROM inventory WHERE amount <= 0")
-        conn.commit()
-        conn.close()
-        await interaction.followup.send(f"✅ Troca realizada com sucesso!")
-    else:
-        await interaction.followup.send("❌ Troca cancelada.")
-
-# --- DEMAIS COMANDOS (Customização, Admin, etc) ---
-
-@bot.tree.command(name="disponiveis", description="Mostra todas as cartas do sistema.")
-@app_commands.choices(categoria=[app_commands.Choice(name="Humanos", value="Humanos"), app_commands.Choice(name="Supers", value="Supers")])
-async def disponiveis(interaction: discord.Interaction, categoria: Optional[str] = None, tag: Optional[str] = None):
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    query = "SELECT id, name, category, tag FROM cards"
-    params = []
-    if categoria or tag:
-        query += " WHERE"
-        if categoria:
-            query += " category = ?"
-            params.append(categoria)
-        if tag:
-            if categoria: query += " AND"
-            query += " tag = ?"
-            params.append(tag)
-    c.execute(query, tuple(params))
-    cards = c.fetchall()
-    conn.close()
-    if not cards: return await interaction.response.send_message("Nada encontrado.", ephemeral=True)
-    desc = "\n".join([f"`#{c[0]}` **{c[1]}** ({c[2]} - {c[3]})" for c in cards])
-    await interaction.response.send_message(embed=discord.Embed(title="🗃️ Catálogo", description=desc[:4000], color=discord.Color.green()))
-
-@bot.tree.command(name="setname", description="Mude seu nome no perfil.")
-async def setname(interaction: discord.Interaction, nome: str):
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    c.execute("UPDATE users SET custom_name = ? WHERE discord_id = ?", (nome, interaction.user.id))
-    conn.commit()
-    conn.close()
-    await interaction.response.send_message(f"✅ Nome alterado!")
-
-@bot.tree.command(name="setimage", description="Defina imagem do perfil (link).")
-async def setimage(interaction: discord.Interaction, url: str):
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    c.execute("UPDATE users SET custom_image = ? WHERE discord_id = ?", (url, interaction.user.id))
-    conn.commit()
-    conn.close()
-    await interaction.response.send_message(f"✅ Imagem alterada!")
-
-@bot.tree.command(name="time", description="Escolha sua facção.")
-@app_commands.choices(tag=[app_commands.Choice(name=t, value=t) for t in ["Nova Ordem", "Ascendentes", "Vigilantes", "Esquadrão Solar", "Civis", "Idols", "NPCs"]])
-async def time(interaction: discord.Interaction, tag: app_commands.Choice[str]):
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    c.execute("UPDATE users SET team = ? WHERE discord_id = ?", (tag.value, interaction.user.id))
-    conn.commit()
-    conn.close()
-    await interaction.response.send_message(f"✅ Time definido: **{tag.value}**")
-
-@bot.tree.command(name="meuheroi", description="Defina seu favorito.")
-async def meuheroi(interaction: discord.Interaction, codigo: int):
-    user_id = interaction.user.id
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    c.execute("SELECT id FROM inventory WHERE user_id = ? AND card_id = ?", (user_id, codigo))
-    if not c.fetchone():
-        conn.close()
-        return await interaction.response.send_message("❌ Você não tem essa carta!", ephemeral=True)
-    c.execute("UPDATE users SET favorite_card_id = ? WHERE discord_id = ?", (codigo, user_id))
-    conn.commit()
-    conn.close()
-    await interaction.response.send_message(f"⭐ Favorito definido!")
-
-@bot.tree.command(name="descartar", description="Descarte uma carta do seu inventário.")
-async def descartar(interaction: discord.Interaction, codigo: int):
-    user_id = interaction.user.id
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    
-    # Verificar se o usuário possui a carta
-    c.execute("SELECT id, amount, is_evolved FROM inventory WHERE user_id = ? AND card_id = ?", (user_id, codigo))
-    items = c.fetchall()
-    
-    if not items:
-        conn.close()
-        return await interaction.response.send_message("❌ Você não possui essa carta no seu inventário!", ephemeral=True)
-    
-    # Prioriza descartar a normal se tiver as duas
-    target_item = next((i for i in items if i[2] == 0), items[0])
-
-    if target_item[1] > 1:
-        c.execute("UPDATE inventory SET amount = amount - 1 WHERE id = ?", (target_item[0],))
-    else:
-        c.execute("DELETE FROM inventory WHERE id = ?", (target_item[0],))
-    
-    c.execute("SELECT name FROM cards WHERE id = ?", (codigo,))
-    card_name = c.fetchone()[0]
-    conn.commit()
-    conn.close()
-    
-    status = "Coroada 👑" if target_item[2] == 1 else "Normal"
-    await interaction.response.send_message(f"🗑️ Você descartou 1 unidade de **{card_name}** ({status}).")
-
-@bot.tree.command(name="setgif", description="[ADMIN] Definir GIF de evolução.")
-async def setgif(interaction: discord.Interaction, codigo: int, url_gif: str):
-    if not interaction.user.guild_permissions.administrator: return
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    c.execute("UPDATE cards SET evolved_image_url = ? WHERE id = ?", (url_gif, codigo))
-    conn.commit()
-    conn.close()
-    await interaction.response.send_message(f"✅ GIF definido para #{codigo}!")
-
-@bot.tree.command(name="add_carta", description="[ADMIN] Add carta.")
-async def add_carta(interaction: discord.Interaction, nome: str, categoria: str, tag: str, url_imagem: str, url_gif: Optional[str] = None):
-    if not interaction.user.guild_permissions.administrator: return
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO cards (name, category, tag, image_url, evolved_image_url) VALUES (?, ?, ?, ?, ?)", (nome, categoria, tag, url_imagem, url_gif))
-    conn.commit()
-    conn.close()
-    await interaction.response.send_message(f"✅ Adicionada!")
-
-@bot.tree.command(name="remover_carta", description="[ADMIN] Remove uma carta permanentemente do sistema.")
-async def remover_carta(interaction: discord.Interaction, codigo: int):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message("❌ Apenas administradores podem remover cartas!", ephemeral=True)
-    
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    
-    # Verificar se a carta existe
-    c.execute("SELECT name FROM cards WHERE id = ?", (codigo,))
-    card = c.fetchone()
-    if not card:
-        conn.close()
-        return await interaction.response.send_message(f"❌ Carta com ID #{codigo} não encontrada.", ephemeral=True)
-    
-    # Remover a carta e limpar inventários
-    c.execute("DELETE FROM cards WHERE id = ?", (codigo,))
-    c.execute("DELETE FROM inventory WHERE card_id = ?", (codigo,))
-    
-    conn.commit()
-    conn.close()
-    await interaction.response.send_message(f"🗑️ A carta **{card[0]}** (ID #{codigo}) foi removida do sistema e de todos os inventários.")
+# --- CLASSES E UTILITÁRIOS ---
 
 class ConfirmInteraction(discord.ui.View):
-    def __init__(self, target, challenger):
-        super().__init__(timeout=60)
-        self.target, self.challenger, self.value = target, challenger, None
+    def __init__(self, target, challenger, timeout=60):
+        super().__init__(timeout=timeout)
+        self.target = target
+        self.challenger = challenger
+        self.value = None
     @discord.ui.button(label="Aceitar", style=discord.ButtonStyle.green)
     async def accept(self, interaction, button):
         if interaction.user != self.target: return
@@ -495,7 +142,763 @@ class ConfirmInteraction(discord.ui.View):
         self.stop()
         await interaction.response.defer()
 
-@bot.event
-async def on_ready(): print(f'Online: {bot.user}')
+def get_user_db(user_id):
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE discord_id = ?", (user_id,))
+    user = c.fetchone()
+    if not user:
+        c.execute("INSERT INTO users (discord_id) VALUES (?)", (user_id,))
+        conn.commit()
+        c.execute("SELECT * FROM users WHERE discord_id = ?", (user_id,))
+        user = c.fetchone()
+    conn.close()
+    return user
 
-if __name__ == "__main__": bot.run(TOKEN)
+async def get_card_image_with_frame(card_url, frame_url):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(card_url) as resp:
+            if resp.status != 200: return card_url
+            card_bytes = io.BytesIO(await resp.read())
+        async with session.get(frame_url) as resp:
+            if resp.status != 200: return card_url
+            frame_bytes = io.BytesIO(await resp.read())
+    
+    card_img = Image.open(card_bytes).convert("RGBA")
+    frame_img = Image.open(frame_bytes).convert("RGBA")
+    
+    # Redimensionar moldura para o tamanho da carta
+    frame_img = frame_img.resize(card_img.size, Image.Resampling.LANCZOS)
+    
+    # Sobrepor
+    combined = Image.alpha_composite(card_img, frame_img)
+    
+    # Salvar temporariamente
+    output = io.BytesIO()
+    combined.save(output, format="PNG")
+    output.seek(0)
+    return output
+
+# --- CORES E EMOJIS ---
+def get_aesthetic_emojis(aesthetic_id):
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("SELECT emojis FROM aesthetics WHERE id = ?", (aesthetic_id,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return row[0].split(',')
+    return ['👤','📊','🏆','🏢','⭐','💰']
+
+# --- COMANDOS DE ECONOMIA ---
+
+@bot.tree.command(name="salario", description="Receba seu salário diário de $200.")
+async def salario(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    user_data = get_user_db(user_id)
+    
+    now = datetime.datetime.now()
+    if user_data[6]: # last_salary
+        last_salary = datetime.datetime.fromisoformat(user_data[6])
+        if (now - last_salary).days < 1:
+            proximo = last_salary + datetime.timedelta(days=1)
+            espera = proximo - now
+            horas = espera.seconds // 3600
+            minutos = (espera.seconds // 60) % 60
+            return await interaction.response.send_message(f"⌛ Você já recebeu seu salário hoje! Volte em {horas}h {minutos}min.", ephemeral=True)
+    
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("UPDATE users SET balance = balance + 200, last_salary = ? WHERE discord_id = ?", (now.isoformat(), user_id))
+    conn.commit()
+    conn.close()
+    
+    await interaction.response.send_message(f"💰 **Salário Recebido!** Você ganhou **$200** moedas da Vought.")
+
+# --- COMANDOS DE PERFIL ---
+
+@bot.tree.command(name="setname", description="Define o nome do seu perfil.")
+async def setname(interaction: discord.Interaction, nome: str):
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("UPDATE users SET custom_name = ? WHERE discord_id = ?", (nome, interaction.user.id))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ Nome alterado para: **{nome}**")
+
+@bot.tree.command(name="setbio", description="Define a bio do seu perfil.")
+async def setbio(interaction: discord.Interaction, bio: str):
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("UPDATE users SET bio = ? WHERE discord_id = ?", (bio, interaction.user.id))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ Bio atualizada!")
+
+@bot.tree.command(name="setcolor", description="Define a cor do seu perfil (Hexadecimal, ex: FF0000).")
+async def setcolor(interaction: discord.Interaction, hex_color: str):
+    # Validar Hex
+    hex_color = hex_color.replace("#", "")
+    if len(hex_color) != 6:
+        return await interaction.response.send_message("❌ Cor inválida! Use o formato hexadecimal de 6 dígitos (ex: FF0000).", ephemeral=True)
+    
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("UPDATE users SET embed_color = ? WHERE discord_id = ?", (hex_color, interaction.user.id))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ Cor do perfil alterada!")
+
+@bot.tree.command(name="carreira", description="Veja seu perfil completo.")
+async def carreira(interaction: discord.Interaction, membro: Optional[discord.Member] = None):
+    target = membro or interaction.user
+    user_data = get_user_db(target.id)
+    
+    # Emojis do Aesthetic
+    emojis = get_aesthetic_emojis(user_data[14] or 'default')
+    
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("SELECT SUM(amount) FROM inventory WHERE user_id = ?", (target.id,))
+    total_cards = c.fetchone()[0] or 0
+    
+    # Ranking
+    ranking = get_ranking_pos(target.id)
+    
+    # Favorito (Amor)
+    fav_card = None
+    if user_data[2]:
+        c.execute("SELECT name FROM cards WHERE id = ?", (user_data[2],))
+        fav_card = c.fetchone()
+    
+    # Parceiro (Casamento)
+    parceiro_text = "Ninguém"
+    if user_data[3]: # partner_id
+        if user_data[4] == 'user':
+            p_user = bot.get_user(user_data[3])
+            parceiro_text = p_user.name if p_user else f"Usuário {user_data[3]}"
+        else:
+            c.execute("SELECT name FROM cards WHERE id = ?", (user_data[3],))
+            p_card = c.fetchone()
+            parceiro_text = p_card[0] if p_card else "Uma Carta"
+    
+    conn.close()
+    
+    color = int(user_data[13] or "000000", 16)
+    display_name = user_data[10] or target.name
+    
+    embed = discord.Embed(title=f"📁 Dossier: {display_name}", description=user_data[12] or "Sem bio definida.", color=color)
+    embed.add_field(name=f"{emojis[0]} Nome", value=display_name, inline=True)
+    embed.add_field(name=f"{emojis[1]} Cartas", value=str(total_cards), inline=True)
+    embed.add_field(name=f"{emojis[2]} Rank", value=f"#{ranking}", inline=True)
+    embed.add_field(name=f"{emojis[3]} Time", value=user_data[1] or "Nenhum", inline=True)
+    embed.add_field(name=f"{emojis[4]} Seu Amor", value=fav_card[0] if fav_card else "Ninguém", inline=True)
+    embed.add_field(name=f"💍 Parceiro", value=parceiro_text, inline=True)
+    embed.add_field(name=f"⚔️ Vitórias", value=str(user_data[9] or 0), inline=True)
+    embed.add_field(name=f"{emojis[5]} Moedas", value=f"${user_data[8] or 0}", inline=True)
+    
+    if user_data[11]: # custom_image
+        embed.set_thumbnail(url=user_data[11])
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="ranking", description="Mostra o ranking dos jogadores.")
+async def ranking(interaction: discord.Interaction):
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT users.discord_id, users.custom_name, SUM(inventory.amount) as total 
+                 FROM users 
+                 LEFT JOIN inventory ON users.discord_id = inventory.user_id 
+                 GROUP BY users.discord_id 
+                 ORDER BY total DESC LIMIT 10''')
+    top_players = c.fetchall()
+    conn.close()
+    
+    desc = ""
+    for idx, row in enumerate(top_players):
+        user = bot.get_user(row[0])
+        name = row[1] or (user.name if user else f"Usuário {row[0]}")
+        total = row[2] or 0
+        desc += f"**{idx+1}. {name}** — {total} cartas\n"
+    
+    embed = discord.Embed(title="🏆 Ranking Global da Vought", description=desc or "Nenhum jogador no ranking ainda.", color=discord.Color.gold())
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="setimage", description="Define sua foto de perfil (Anexe uma imagem).")
+async def setimage(interaction: discord.Interaction, imagem: discord.Attachment):
+    if not imagem.content_type.startswith("image/"):
+        return await interaction.response.send_message("❌ O arquivo anexado deve ser uma imagem!", ephemeral=True)
+    
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("UPDATE users SET custom_image = ? WHERE discord_id = ?", (imagem.url, interaction.user.id))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ Imagem de perfil atualizada com sucesso!")
+
+@bot.tree.command(name="moedas", description="Veja seu saldo de moedas.")
+async def moedas(interaction: discord.Interaction):
+    user_data = get_user_db(interaction.user.id)
+    await interaction.response.send_message(f"💰 Você possui **${user_data[8] or 0}** moedas da Vought.")
+
+@bot.tree.command(name="recrutar", description="Dropa uma carta aleatória a cada 10 minutos.")
+async def recrutar(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    user_data = get_user_db(user_id)
+    
+    now = datetime.datetime.now()
+    if user_data[5]: # last_drop
+        last_drop = datetime.datetime.fromisoformat(user_data[5])
+        if (now - last_drop).total_seconds() < 600:
+            espera = int(600 - (now - last_drop).total_seconds())
+            return await interaction.response.send_message(f"⌛ Aguarde {espera // 60}m {espera % 60}s para recrutar novamente.", ephemeral=True)
+    
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    # Drop igualitário: Selecionar aleatoriamente sem pesos
+    c.execute("SELECT * FROM cards WHERE category NOT IN ('Especial', 'Comemorativa', 'Duo', 'Casal') ORDER BY RANDOM() LIMIT 1")
+    card = c.fetchone()
+    
+    if not card:
+        conn.close()
+        return await interaction.response.send_message("❌ Nenhuma carta comum cadastrada no sistema!", ephemeral=True)
+    
+    c.execute("INSERT INTO inventory (user_id, card_id, amount, level) VALUES (?, ?, 1, 0) ON CONFLICT(user_id, card_id, level) DO UPDATE SET amount = amount + 1", (user_id, card[0]))
+    c.execute("UPDATE users SET last_drop = ? WHERE discord_id = ?", (now.isoformat(), user_id))
+    conn.commit()
+    conn.close()
+    
+    embed = discord.Embed(title="🎖️ Novo Recruta Encontrado!", color=discord.Color.red())
+    embed.add_field(name="Nome", value=card[1], inline=True)
+    embed.add_field(name="Time", value=card[3], inline=True)
+    embed.set_image(url=card[4])
+    embed.set_footer(text=f"ID: #{card[0]}")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="catalogo", description="Mostra todas as cartas do sistema.")
+@app_commands.choices(categoria=[
+    app_commands.Choice(name="Normal", value="Normal"),
+    app_commands.Choice(name="Comemorativa", value="Comemorativa"),
+    app_commands.Choice(name="Especial", value="Especial"),
+    app_commands.Choice(name="Duo", value="Duo"),
+    app_commands.Choice(name="Casal", value="Casal")
+])
+async def catalogo(interaction: discord.Interaction, categoria: Optional[str] = None, time: Optional[str] = None):
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    query = "SELECT id, name, category, tag FROM cards"
+    params = []
+    if categoria or time:
+        query += " WHERE"
+        if categoria:
+            query += " category = ?"
+            params.append(categoria)
+        if time:
+            if categoria: query += " AND"
+            query += " tag = ?"
+            params.append(time)
+    
+    c.execute(query, tuple(params))
+    cards = c.fetchall()
+    conn.close()
+    
+    if not cards:
+        return await interaction.response.send_message("❌ Nenhuma carta encontrada com esses filtros.", ephemeral=True)
+    
+    desc = "\n".join([f"`#{c[0]}` **{c[1]}** ({c[2]} - {c[3]})" for c in cards])
+    embed = discord.Embed(title="🗃️ Catálogo da Vought", description=desc[:4000], color=discord.Color.blue())
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="admirar", description="Veja detalhes de uma carta específica.")
+async def admirar(interaction: discord.Interaction, codigo: int):
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("SELECT name, category, tag, image_url, evolved_image_url FROM cards WHERE id = ?", (codigo,))
+    card = c.fetchone()
+    
+    if not card:
+        conn.close()
+        return await interaction.response.send_message("❌ Carta não encontrada!", ephemeral=True)
+    
+    c.execute("SELECT amount, level FROM inventory WHERE user_id = ? AND card_id = ?", (interaction.user.id, codigo))
+    inv = c.fetchall()
+    conn.close()
+    
+    level_names = {0: "Normal", 1: "1 Estrela ⭐", 2: "2 Estrelas ⭐⭐", 3: "3 Estrelas ⭐⭐⭐", 4: "Coroada 👑"}
+    
+    embed = discord.Embed(title=f"🔍 Admirando: {card[0]}", color=discord.Color.purple())
+    embed.add_field(name="Categoria", value=card[1], inline=True)
+    embed.add_field(name="Time", value=card[2], inline=True)
+    
+    if inv:
+        status = "\n".join([f"**{level_names[i[1]]}**: {i[0]} unidades" for i in inv])
+        embed.add_field(name="No seu Inventário", value=status, inline=False)
+        # Mostrar imagem evoluída se tiver a coroada
+        has_coroada = any(i[1] == 4 for i in inv)
+        img = card[4] if (has_coroada and card[4]) else card[3]
+        embed.set_image(url=img)
+    else:
+        embed.add_field(name="Status", value="Você não possui esta carta.", inline=False)
+        embed.set_image(url=card[3])
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="injetarv", description="Evolua suas cartas usando Composto V.")
+async def injetarv(interaction: discord.Interaction, codigo: int):
+    user_id = interaction.user.id
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    
+    # Buscar inventário da carta para o nível atual
+    # Regra: 10 normais -> 1 estrela | 2 de 1 estrela -> 2 estrelas | 2 de 2 estrelas -> 3 estrelas | 2 de 3 estrelas -> Coroada
+    
+    c.execute("SELECT level, amount FROM inventory WHERE user_id = ? AND card_id = ? ORDER BY level ASC", (user_id, codigo))
+    inv = c.fetchall()
+    
+    if not inv:
+        conn.close()
+        return await interaction.response.send_message("❌ Você não possui esta carta!", ephemeral=True)
+    
+    current_levels = {row[0]: row[1] for row in inv}
+    
+    success = False
+    new_level = 0
+    
+    if 0 in current_levels and current_levels[0] >= 10:
+        # Normal -> 1 Estrela
+        c.execute("UPDATE inventory SET amount = amount - 10 WHERE user_id = ? AND card_id = ? AND level = 0", (user_id, codigo))
+        new_level = 1
+        success = True
+    elif 1 in current_levels and current_levels[1] >= 2:
+        # 1 Estrela -> 2 Estrelas
+        c.execute("UPDATE inventory SET amount = amount - 2 WHERE user_id = ? AND card_id = ? AND level = 1", (user_id, codigo))
+        new_level = 2
+        success = True
+    elif 2 in current_levels and current_levels[2] >= 2:
+        # 2 Estrelas -> 3 Estrelas
+        c.execute("UPDATE inventory SET amount = amount - 2 WHERE user_id = ? AND card_id = ? AND level = 2", (user_id, codigo))
+        new_level = 3
+        success = True
+    elif 3 in current_levels and current_levels[3] >= 2:
+        # 3 Estrelas -> Coroada
+        c.execute("UPDATE inventory SET amount = amount - 2 WHERE user_id = ? AND card_id = ? AND level = 3", (user_id, codigo))
+        new_level = 4
+        success = True
+    
+    if success:
+        c.execute("INSERT INTO inventory (user_id, card_id, amount, level) VALUES (?, ?, 1, ?) ON CONFLICT(user_id, card_id, level) DO UPDATE SET amount = amount + 1", (user_id, codigo, new_level))
+        c.execute("DELETE FROM inventory WHERE amount <= 0")
+        conn.commit()
+        conn.close()
+        level_names = {1: "1 Estrela ⭐", 2: "2 Estrelas ⭐⭐", 3: "3 Estrelas ⭐⭐⭐", 4: "Coroada 👑"}
+        await interaction.response.send_message(f"🧪 **Composto V Injetado!** Sua carta agora é nível **{level_names[new_level]}**.")
+    else:
+        conn.close()
+        await interaction.response.send_message("❌ Você não tem cartas suficientes para evoluir! (Precisa de 10 normais ou 2 do nível anterior).", ephemeral=True)
+
+@bot.tree.command(name="batalha", description="Desafie um membro para uma batalha de cartas.")
+async def batalha(interaction: discord.Interaction, oponente: discord.Member, codigo_sua_carta: int):
+    if oponente.id == interaction.user.id:
+        return await interaction.response.send_message("❌ Você não pode lutar contra si mesmo!", ephemeral=True)
+    
+    user_id = interaction.user.id
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("SELECT level FROM inventory WHERE user_id = ? AND card_id = ? ORDER BY level DESC LIMIT 1", (user_id, codigo_sua_carta))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return await interaction.response.send_message("❌ Você não possui esta carta!", ephemeral=True)
+    
+    user_level = row[0]
+    conn.close()
+
+    view = ConfirmInteraction(oponente, interaction.user)
+    await interaction.response.send_message(f"⚔️ {oponente.mention}, você foi desafiado por {interaction.user.mention}! Aceita lutar?", view=view)
+    
+    await view.wait()
+    if view.value:
+        # Oponente escolhe a carta (simplificado: ele usa a melhor dele para o exemplo, ou podemos pedir o ID)
+        # Para este bot, vamos pedir que o oponente tenha ao menos uma carta.
+        conn = sqlite3.connect('the_boys_bot.db')
+        c = conn.cursor()
+        c.execute("SELECT level FROM inventory WHERE user_id = ? ORDER BY level DESC LIMIT 1", (oponente.id,))
+        op_row = c.fetchone()
+        
+        if not op_row:
+            conn.close()
+            return await interaction.followup.send(f"❌ {oponente.name} não possui cartas para lutar!")
+        
+        op_level = op_row[0]
+        
+        # Lógica de Força: Normal(10), 1*(25), 2*(50), 3*(100), Coroada(200)
+        power_map = {0: 10, 1: 25, 2: 50, 3: 100, 4: 200}
+        user_power = random.randint(1, power_map[user_level])
+        op_power = random.randint(1, power_map[op_level])
+        
+        vencedor = interaction.user if user_power >= op_power else oponente
+        c.execute("UPDATE users SET wins = wins + 1 WHERE discord_id = ?", (vencedor.id,))
+        conn.commit()
+        conn.close()
+        
+        await interaction.followup.send(f"🥊 **Fim da Batalha!**\n{interaction.user.name} ({user_power} pts) vs {oponente.name} ({op_power} pts)\n🏆 Vencedor: **{vencedor.mention}**!")
+    else:
+        await interaction.followup.send("🏳️ O desafio foi recusado.")
+
+@bot.tree.command(name="casar", description="Case-se com um usuário ou uma carta.")
+@app_commands.choices(tipo=[app_commands.Choice(name="Usuário", value="user"), app_commands.Choice(name="Carta", value="card")])
+async def casar(interaction: discord.Interaction, tipo: str, alvo_id: str):
+    user_id = interaction.user.id
+    user_data = get_user_db(user_id)
+    
+    if user_data[3]: # partner_id
+        return await interaction.response.send_message("❌ Você já está casado! Divorcie-se primeiro.", ephemeral=True)
+    
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    
+    if tipo == "user":
+        target_user = bot.get_user(int(alvo_id))
+        if not target_user:
+            conn.close()
+            return await interaction.response.send_message("❌ Usuário não encontrado!", ephemeral=True)
+        
+        view = ConfirmInteraction(target_user, interaction.user)
+        await interaction.response.send_message(f"💍 {target_user.mention}, {interaction.user.mention} quer se casar com você! Aceita?", view=view)
+        await view.wait()
+        if view.value:
+            c.execute("UPDATE users SET partner_id = ?, partner_type = 'user' WHERE discord_id = ?", (target_user.id, user_id))
+            c.execute("UPDATE users SET partner_id = ?, partner_type = 'user' WHERE discord_id = ?", (user_id, target_user.id))
+            conn.commit()
+            await interaction.followup.send(f"🎉 **{interaction.user.name}** e **{target_user.name}** agora estão casados!")
+        else:
+            await interaction.followup.send("💔 O pedido de casamento foi recusado.")
+    else:
+        # Casar com carta
+        c.execute("SELECT name FROM cards WHERE id = ?", (int(alvo_id),))
+        card = c.fetchone()
+        if not card:
+            conn.close()
+            return await interaction.response.send_message("❌ Carta não encontrada!", ephemeral=True)
+        
+        c.execute("UPDATE users SET partner_id = ?, partner_type = 'card' WHERE discord_id = ?", (int(alvo_id), user_id))
+        conn.commit()
+        await interaction.response.send_message(f"💍 Você agora está casado com a carta **{card[0]}**!")
+    
+    conn.close()
+
+@bot.tree.command(name="divorciar", description="Divorcie-se do seu parceiro atual.")
+async def divorciar(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    user_data = get_user_db(user_id)
+    
+    if not user_data[3]:
+        return await interaction.response.send_message("❌ Você não está casado!", ephemeral=True)
+    
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    
+    if user_data[4] == 'user':
+        # Remover de ambos
+        c.execute("UPDATE users SET partner_id = NULL, partner_type = NULL WHERE discord_id = ?", (user_data[3],))
+    
+    c.execute("UPDATE users SET partner_id = NULL, partner_type = NULL WHERE discord_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message("💔 Você se divorciou com sucesso.")
+
+@bot.tree.command(name="trocar", description="Troque uma carta com outro jogador.")
+async def trocar(interaction: discord.Interaction, oponente: discord.Member, sua_carta_id: int, carta_dele_id: int):
+    # Verificação de posse
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?", (interaction.user.id, sua_carta_id))
+    u_card = c.fetchone()
+    c.execute("SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?", (oponente.id, carta_dele_id))
+    o_card = c.fetchone()
+    
+    if not u_card or not o_card:
+        conn.close()
+        return await interaction.response.send_message("❌ Um de vocês não possui a carta mencionada!", ephemeral=True)
+    
+    view = ConfirmInteraction(oponente, interaction.user)
+    await interaction.response.send_message(f"🤝 {oponente.mention}, {interaction.user.mention} quer trocar a carta #{sua_carta_id} pela sua #{carta_dele_id}. Aceita?", view=view)
+    await view.wait()
+    if view.value:
+        # Lógica de troca
+        c.execute("UPDATE inventory SET amount = amount - 1 WHERE user_id = ? AND card_id = ?", (interaction.user.id, sua_carta_id))
+        c.execute("UPDATE inventory SET amount = amount - 1 WHERE user_id = ? AND card_id = ?", (oponente.id, carta_dele_id))
+        c.execute("INSERT INTO inventory (user_id, card_id, amount, level) VALUES (?, ?, 1, 0) ON CONFLICT(user_id, card_id, level) DO UPDATE SET amount = amount + 1", (interaction.user.id, carta_dele_id))
+        c.execute("INSERT INTO inventory (user_id, card_id, amount, level) VALUES (?, ?, 1, 0) ON CONFLICT(user_id, card_id, level) DO UPDATE SET amount = amount + 1", (oponente.id, sua_carta_id))
+        c.execute("DELETE FROM inventory WHERE amount <= 0")
+        conn.commit()
+        await interaction.followup.send("✅ Troca realizada!")
+    else:
+        await interaction.followup.send("❌ Troca cancelada.")
+    conn.close()
+
+@bot.tree.command(name="caridade", description="Doe uma carta ou moedas para alguém.")
+async def caridade(interaction: discord.Interaction, beneficiario: discord.Member, carta_id: Optional[int] = None, moedas: Optional[int] = None):
+    user_id = interaction.user.id
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    
+    if moedas:
+        c.execute("SELECT balance FROM users WHERE discord_id = ?", (user_id,))
+        balance = c.fetchone()[0]
+        if balance < moedas:
+            conn.close()
+            return await interaction.response.send_message("❌ Saldo insuficiente!", ephemeral=True)
+        c.execute("UPDATE users SET balance = balance - ? WHERE discord_id = ?", (moedas, user_id))
+        c.execute("UPDATE users SET balance = balance + ? WHERE discord_id = ?", (moedas, beneficiario.id))
+        await interaction.response.send_message(f"🎁 Você doou **${moedas}** para {beneficiario.name}!")
+    
+    if carta_id:
+        c.execute("SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?", (user_id, carta_id))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return await interaction.response.send_message("❌ Você não tem essa carta!", ephemeral=True)
+        c.execute("UPDATE inventory SET amount = amount - 1 WHERE user_id = ? AND card_id = ?", (user_id, carta_id))
+        c.execute("INSERT INTO inventory (user_id, card_id, amount, level) VALUES (?, ?, 1, 0) ON CONFLICT(user_id, card_id, level) DO UPDATE SET amount = amount + 1", (beneficiario.id, carta_id))
+        c.execute("DELETE FROM inventory WHERE amount <= 0")
+        await interaction.response.send_message(f"🎁 Você doou a carta **#{carta_id}** para {beneficiario.name}!")
+    
+    conn.commit()
+    conn.close()
+
+@bot.tree.command(name="shopping", description="Acesse a loja da Vought.")
+async def shopping(interaction: discord.Interaction):
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("SELECT * FROM shop")
+    items = c.fetchall()
+    conn.close()
+    
+    if not items:
+        return await interaction.response.send_message("🛒 A loja está vazia no momento!", ephemeral=True)
+    
+    desc = ""
+    for item in items:
+        desc += f"`ID: {item[2]}` **{item[3]}** — ${item[4]}\n"
+    
+    embed = discord.Embed(title="🛒 Shopping Vought International", description=desc, color=discord.Color.blue())
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="comprar", description="Compre um item da loja.")
+async def comprar(interaction: discord.Interaction, item_id: str):
+    user_id = interaction.user.id
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    
+    # Verificar item
+    c.execute("SELECT * FROM shop WHERE item_id = ?", (item_id,))
+    item = c.fetchone()
+    if not item:
+        conn.close()
+        return await interaction.response.send_message("❌ Item não encontrado!", ephemeral=True)
+    
+    # Verificar saldo
+    c.execute("SELECT balance FROM users WHERE discord_id = ?", (user_id,))
+    balance = c.fetchone()[0]
+    if balance < item[4]:
+        conn.close()
+        return await interaction.response.send_message("❌ Saldo insuficiente!", ephemeral=True)
+    
+    # Processar compra
+    c.execute("UPDATE users SET balance = balance - ? WHERE discord_id = ?", (item[4], user_id))
+    c.execute("INSERT INTO user_cosmetics (user_id, item_type, item_id) VALUES (?, ?, ?)", (user_id, item[1], item_id))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ Você comprou **{item[3]}** com sucesso!")
+
+@bot.tree.command(name="setemoji", description="Define o aesthetic do seu perfil.")
+async def setemoji(interaction: discord.Interaction, aesthetic_id: str):
+    user_id = interaction.user.id
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    
+    # Verificar se possui
+    c.execute("SELECT * FROM user_cosmetics WHERE user_id = ? AND item_id = ?", (user_id, aesthetic_id))
+    if not c.fetchone() and aesthetic_id != 'default':
+        conn.close()
+        return await interaction.response.send_message("❌ Você não possui este aesthetic!", ephemeral=True)
+    
+    c.execute("UPDATE users SET aesthetic_id = ? WHERE discord_id = ?", (aesthetic_id, user_id))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ Estética do perfil alterada!")
+
+@bot.tree.command(name="enfeitar", description="Adiciona uma moldura em uma carta.")
+async def enfeitar(interaction: discord.Interaction, codigo_moldura: str, codigo_carta: int):
+    user_id = interaction.user.id
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    
+    # Verificar moldura e carta
+    c.execute("SELECT * FROM user_cosmetics WHERE user_id = ? AND item_id = ?", (user_id, codigo_moldura))
+    if not c.fetchone():
+        conn.close()
+        return await interaction.response.send_message("❌ Você não possui esta moldura!", ephemeral=True)
+    
+    c.execute("SELECT id FROM inventory WHERE user_id = ? AND card_id = ?", (user_id, codigo_carta))
+    if not c.fetchone():
+        conn.close()
+        return await interaction.response.send_message("❌ Você não possui esta carta!", ephemeral=True)
+    
+    c.execute("UPDATE inventory SET frame_id = ? WHERE user_id = ? AND card_id = ?", (codigo_moldura, user_id, codigo_carta))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ Moldura aplicada à carta #{codigo_carta}!")
+
+@bot.tree.command(name="bingo", description="Inicia uma partida de bingo valendo $150.")
+async def bingo(interaction: discord.Interaction):
+    await interaction.response.send_message("🎱 **BINGO DA VOUGHT!** Quem quer participar? (Aguardando jogadores...)")
+    # Lógica de bingo simplificada: Escolhe um ganhador entre quem reagir (simulação)
+    # Em um bot real, usaríamos eventos de reação, mas aqui faremos um sorteio rápido.
+    await discord.utils.sleep_until(datetime.datetime.now() + datetime.timedelta(seconds=30))
+    # Simulação de ganhador
+    vencedor = interaction.user # Para teste
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("UPDATE users SET balance = balance + 150 WHERE discord_id = ?", (vencedor.id,))
+    conn.commit()
+    conn.close()
+    await interaction.followup.send(f"🎉 O bingo acabou! O ganhador foi {vencedor.mention} e recebeu **$150**!")
+
+@bot.tree.command(name="presentemisterioso", description="Comando diário para ganhar prêmios aleatórios.")
+async def presentemisterioso(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    user_data = get_user_db(user_id)
+    now = datetime.datetime.now()
+    if user_data[7]: # last_mystery
+        last = datetime.datetime.fromisoformat(user_data[7])
+        if (now - last).days < 1:
+            return await interaction.response.send_message("⌛ Você já resgatou seu presente hoje!", ephemeral=True)
+    
+    premios = ["moedas", "carta_normal", "carta_especial", "moldura"]
+    premio = random.choice(premios)
+    
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    msg = ""
+    if premio == "moedas":
+        valor = random.randint(10, 500)
+        c.execute("UPDATE users SET balance = balance + ? WHERE discord_id = ?", (valor, user_id))
+        msg = f"🎁 Você ganhou **${valor}** moedas!"
+    elif premio == "carta_normal":
+        c.execute("SELECT id, name FROM cards WHERE category = 'Normal' ORDER BY RANDOM() LIMIT 1")
+        card = c.fetchone()
+        if card:
+            c.execute("INSERT INTO inventory (user_id, card_id, amount, level) VALUES (?, ?, 1, 0) ON CONFLICT(user_id, card_id, level) DO UPDATE SET amount = amount + 1", (user_id, card[0]))
+            msg = f"🎁 Você ganhou a carta **{card[1]}**!"
+    else:
+        # Simplificação para outros prêmios
+        valor = 100
+        c.execute("UPDATE users SET balance = balance + ? WHERE discord_id = ?", (valor, user_id))
+        msg = f"🎁 Você ganhou **$100** moedas!"
+        
+    c.execute("UPDATE users SET last_mystery = ? WHERE discord_id = ?", (now.isoformat(), user_id))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(msg)
+
+@bot.tree.command(name="abraçar", description="Dê um abraço em alguém.")
+async def abraçar(interaction: discord.Interaction, membro: discord.Member):
+    await interaction.response.send_message(f"🫂 {interaction.user.mention} deu um abraço caloroso em {membro.mention}!")
+
+@bot.tree.command(name="roubarlanche", description="Tente roubar o lanche de alguém.")
+async def roubarlanche(interaction: discord.Interaction, membro: Optional[discord.Member] = None):
+    alvo = membro.name if membro else "alguém"
+    await interaction.response.send_message(f"🥪 {interaction.user.mention} sorrateiramente roubou o lanche de {alvo}!")
+
+@bot.tree.command(name="add_shopping", description="[ADMIN] Adiciona um item na loja.")
+async def add_shopping(interaction: discord.Interaction, tipo: str, item_id: str, nome: str, preco: int):
+    if not interaction.user.guild_permissions.administrator: return
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO shop (item_type, item_id, name, price) VALUES (?, ?, ?, ?)", (tipo, item_id, nome, preco))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"🛒 Item **{nome}** adicionado à loja!")
+
+@bot.tree.command(name="bônus", description="[ADMIN] Dá moedas para um jogador.")
+async def bônus(interaction: discord.Interaction, membro: discord.Member, quantia: int):
+    if not interaction.user.guild_permissions.administrator: return
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("UPDATE users SET balance = balance + ? WHERE discord_id = ?", (quantia, membro.id))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"💸 **{quantia}** moedas foram adicionadas à conta de {membro.name}!")
+
+@bot.tree.command(name="claim", description="[ADMIN] Dá uma carta para um jogador.")
+async def claim(interaction: discord.Interaction, membro: discord.Member, codigo_carta: int):
+    if not interaction.user.guild_permissions.administrator: return
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO inventory (user_id, card_id, amount, level) VALUES (?, ?, 1, 0) ON CONFLICT(user_id, card_id, level) DO UPDATE SET amount = amount + 1", (membro.id, codigo_carta))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"🎁 Carta #{codigo_carta} adicionada ao inventário de {membro.name}!")
+
+@bot.tree.command(name="criar_duo", description="[ADMIN] Cria uma carta de duo/casal.")
+async def criar_duo(interaction: discord.Interaction, carta_a: int, carta_b: int, nome_duo: str, url_foto: str, categoria: str):
+    if not interaction.user.guild_permissions.administrator: return
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    # Criar a carta de resultado
+    c.execute("INSERT INTO cards (name, category, tag, image_url) VALUES (?, ?, 'Duo', ?)", (nome_duo, categoria, url_foto))
+    result_id = c.lastrowid
+    # Criar a receita
+    c.execute("INSERT INTO recipes (card_a_id, card_b_id, result_card_id) VALUES (?, ?, ?)", (carta_a, carta_b, result_id))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"💎 Duo **{nome_duo}** criado com sucesso! (ID #{result_id})")
+
+@bot.tree.command(name="combinar", description="Combine duas cartas para formar um Duo/Casal.")
+async def combinar(interaction: discord.Interaction, carta_a: int, carta_b: int):
+    user_id = interaction.user.id
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    
+    # Verificar receita (em qualquer ordem)
+    c.execute("SELECT result_card_id FROM recipes WHERE (card_a_id = ? AND card_b_id = ?) OR (card_a_id = ? AND card_b_id = ?)", (carta_a, carta_b, carta_b, carta_a))
+    recipe = c.fetchone()
+    
+    if not recipe:
+        conn.close()
+        return await interaction.response.send_message("❌ Essas cartas não formam um Duo!", ephemeral=True)
+    
+    # Verificar posse
+    c.execute("SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?", (user_id, carta_a))
+    inv_a = c.fetchone()
+    c.execute("SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?", (user_id, carta_b))
+    inv_b = c.fetchone()
+    
+    if not inv_a or not inv_b:
+        conn.close()
+        return await interaction.response.send_message("❌ Você não possui as cartas necessárias!", ephemeral=True)
+    
+    # Processar combinação
+    c.execute("UPDATE inventory SET amount = amount - 1 WHERE user_id = ? AND card_id = ?", (user_id, carta_a))
+    c.execute("UPDATE inventory SET amount = amount - 1 WHERE user_id = ? AND card_id = ?", (user_id, carta_b))
+    c.execute("INSERT INTO inventory (user_id, card_id, amount, level) VALUES (?, ?, 1, 0) ON CONFLICT(user_id, card_id, level) DO UPDATE SET amount = amount + 1", (user_id, recipe[0]))
+    c.execute("DELETE FROM inventory WHERE amount <= 0")
+    
+    c.execute("SELECT name FROM cards WHERE id = ?", (recipe[0],))
+    duo_name = c.fetchone()[0]
+    
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✨ **Fusão Completa!** Você obteve a carta Duo: **{duo_name}**!")
+
+@bot.event
+async def on_ready():
+    print(f'Vought International Bot Online: {bot.user}')
+
+if __name__ == "__main__":
+    if TOKEN:
+        bot.run(TOKEN)
+    else:
+        print("Erro: DISCORD_TOKEN não encontrado.")
