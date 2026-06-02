@@ -116,7 +116,7 @@ def init_db():
         ('soft', 'Soft', '💭,🍨,🍰,🎀,✨️,🧸'),
         ('dark', 'Dark', '🩸,🕯️,🦇,🍷,🖤,🕸️'),
         ('cottage', 'Cottage', '🌳,📚,👒,🌷,🌷,🧺'),
-        ('sweet', 'Sweet', ' waffle,🍩,🍮,🍨,🍫,🍯'),
+        ('sweet', 'Sweet', ' 🍭,🍩,🍮,🍨,🍫,🍯'),
         ('zoo', 'Zoo', '🐶,🐰,🐱,🐹,🐻,🦊'),
         ('default', 'Padrão', '👤,📊,🏆,🏢,⭐,💰')
     ]
@@ -907,7 +907,7 @@ async def agencia(interaction: discord.Interaction, categoria: Optional[str] = N
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="time", description="Escolha sua facção.")
-@app_commands.choices(tag=[app_commands.Choice(name=t, value=t) for t in ["Nova Ordem", "Ascendentes", "Vigilantes", "Esquadrão Solar", "Idols", "NPCs"]])
+@app_commands.choices(tag=[app_commands.Choice(name=t, value=t) for t in ["Nova Ordem", "Ascendentes", "Vigilantes", "Esquadrão Solar", "Idols", "Civis", "NPCs"]])
 async def time(interaction: discord.Interaction, tag: app_commands.Choice[str]):
     conn = sqlite3.connect('the_boys_bot.db')
     c = conn.cursor()
