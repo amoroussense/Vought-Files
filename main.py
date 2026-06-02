@@ -11,9 +11,15 @@ from PIL import Image
 from dotenv import load_dotenv
 from typing import Optional, List, Union
 
-# Carregar variáveis de ambiente
-load_dotenv()
+# Tenta carregar do .env se existir
+load_dotenv( )
+
+# Tenta pegar do ambiente (Railway) ou do .env
 TOKEN = os.getenv('DISCORD_TOKEN')
+
+# Se ainda estiver vazio, tente limpar espaços extras que podem ter vindo na colagem
+if TOKEN:
+    TOKEN = TOKEN.strip().replace('"', '').replace("'", "")
 
 # Configuração do Bot
 class TheBoysBot(commands.Bot):
