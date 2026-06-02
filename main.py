@@ -11,13 +11,9 @@ from PIL import Image
 from dotenv import load_dotenv
 from typing import Optional, List, Union
 
-# Tenta carregar do .env se existir
-load_dotenv( )
-
-# Tenta pegar do ambiente (Railway) ou do .env
+# Carregar variáveis de ambiente
+load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
-
-# Se ainda estiver vazio, tente limpar espaços extras que podem ter vindo na colagem
 if TOKEN:
     TOKEN = TOKEN.strip().replace('"', '').replace("'", "")
 
@@ -318,7 +314,7 @@ async def carreira(interaction: discord.Interaction, membro: Optional[discord.Me
     embed.add_field(name=f"⚔️ Vitórias", value=str(user_data[9] or 0), inline=True)
     embed.add_field(name=f"{emojis[5]} Moedas", value=f"${user_data[8] or 0}", inline=True)
     
-     # Foto de Perfil Grande (Image)
+    # Foto de Perfil Grande (Image)
     if user_data[11]: # custom_image
         embed.set_image(url=user_data[11])
     
@@ -781,20 +777,66 @@ async def enfeitar(interaction: discord.Interaction, codigo_moldura: str, codigo
     conn.close()
     await interaction.response.send_message(f"✅ Moldura aplicada à carta #{codigo_carta}!")
 
+class BingoView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=30)
+        self.participants = []
+    @discord.ui.button(label="Participar!", style=discord.ButtonStyle.blurple, emoji="🎱")
+    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user not in self.participants:
+            self.participants.append(interaction.user)
+            await interaction.response.send_message("✅ Você entrou no bingo!", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Você já está participando!", ephemeral=True)
+
 @bot.tree.command(name="bingo", description="Inicia uma partida de bingo valendo $150.")
 async def bingo(interaction: discord.Interaction):
-    await interaction.response.send_message("🎱 **BINGO DA VOUGHT!** Quem quer participar? (Aguardando jogadores...)")
-    # Lógica de bingo simplificada: Escolhe um ganhador entre quem reagir (simulação)
-    # Em um bot real, usaríamos eventos de reação, mas aqui faremos um sorteio rápido.
-    await discord.utils.sleep_until(datetime.datetime.now() + datetime.timedelta(seconds=30))
-    # Simulação de ganhador
-    vencedor = interaction.user # Para teste
+    view = BingoView()
+    await interaction.response.send_message("🎱 **BINGO DA VOUGHT!** Clique no botão abaixo para participar! (Sorteio em 30s)", view=view)
+    await view.wait()
+    if not view.participants:
+        return await interaction.followup.send("☹️ Ninguém participou do bingo.")
+    vencedor = random.choice(view.participants)
     conn = sqlite3.connect('the_boys_bot.db')
     c = conn.cursor()
     c.execute("UPDATE users SET balance = balance + 150 WHERE discord_id = ?", (vencedor.id,))
     conn.commit()
     conn.close()
-    await interaction.followup.send(f"🎉 O bingo acabou! O ganhador foi {vencedor.mention} e recebeu **$150**!")
+    await interaction.followup.send(f"🎉 **BINGO!** O ganhador foi {vencedor.mention} e recebeu **$150** moedas!")
+
+class RestaUmView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=30)
+        self.choices = {}
+    @discord.ui.button(label="1", style=discord.ButtonStyle.gray)
+    async def one(self, interaction, button): await self.pick(interaction, 1)
+    @discord.ui.button(label="2", style=discord.ButtonStyle.gray)
+    async def two(self, interaction, button): await self.pick(interaction, 2)
+    @discord.ui.button(label="3", style=discord.ButtonStyle.gray)
+    async def three(self, interaction, button): await self.pick(interaction, 3)
+    async def pick(self, interaction, num):
+        self.choices[interaction.user] = num
+        await interaction.response.send_message(f"✅ Você escolheu o número {num}!", ephemeral=True)
+
+@bot.tree.command(name="restaum", description="Jogo de Resta Um valendo $150.")
+async def restaum(interaction: discord.Interaction):
+    view = RestaUmView()
+    await interaction.response.send_message("🔢 **RESTA UM!** Escolha um número abaixo para participar! (Resultado em 30s)", view=view)
+    await view.wait()
+    if not view.choices:
+        return await interaction.followup.send("☹️ Ninguém participou do jogo.")
+    ganhador_num = random.randint(1, 3)
+    ganhadores = [u for u, n in view.choices.items() if n == ganhador_num]
+    if ganhadores:
+        vencedor = random.choice(ganhadores)
+        conn = sqlite3.connect('the_boys_bot.db')
+        c = conn.cursor()
+        c.execute("UPDATE users SET balance = balance + 150 WHERE discord_id = ?", (vencedor.id,))
+        conn.commit()
+        conn.close()
+        await interaction.followup.send(f"🎰 O número sorteado foi **{ganhador_num}**! O grande vencedor é {vencedor.mention} (+ $150)!")
+    else:
+        await interaction.followup.send(f"🎰 O número sorteado foi **{ganhador_num}**, mas ninguém escolheu ele!")
 
 @bot.tree.command(name="presentemisterioso", description="Comando diário para ganhar prêmios aleatórios.")
 async def presentemisterioso(interaction: discord.Interaction):
@@ -886,8 +928,26 @@ async def criar_duo(interaction: discord.Interaction, carta_a: int, carta_b: int
     conn.close()
     await interaction.response.send_message(f"💎 Duo **{nome_duo}** criado com sucesso! (ID #{result_id})")
 
+@bot.tree.command(name="familia", description="Forme uma família com suas cartas (use códigos separados por vírgula).")
+async def familia(interaction: discord.Interaction, codigos: str):
+    user_id = interaction.user.id
+    # Salvar no banco de dados (usaremos a coluna 'bio' ou uma nova para simplificar, mas aqui vamos simular via tag)
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    # Limpar família anterior
+    c.execute("UPDATE inventory SET is_family = 0 WHERE user_id = ?", (user_id,))
+    
+    list_ids = [int(i.strip()) for i in codigos.split(',')]
+    for cid in list_ids:
+        c.execute("UPDATE inventory SET is_family = 1 WHERE user_id = ? AND card_id = ?", (user_id, cid))
+    
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"👨‍👩‍👧‍👦 Família formada com as cartas: {codigos}!")
+
 @bot.tree.command(name="agencia", description="Veja seu inventário de cartas.")
-async def agencia(interaction: discord.Interaction, categoria: Optional[str] = None, time: Optional[str] = None):
+@app_commands.choices(filtro=[app_commands.Choice(name="Família", value="family")])
+async def agencia(interaction: discord.Interaction, categoria: Optional[str] = None, time: Optional[str] = None, filtro: Optional[str] = None):
     user_id = interaction.user.id
     conn = sqlite3.connect('the_boys_bot.db')
     c = conn.cursor()
@@ -896,6 +956,9 @@ async def agencia(interaction: discord.Interaction, categoria: Optional[str] = N
                JOIN cards ON inventory.card_id = cards.id 
                WHERE inventory.user_id = ?'''
     params = [user_id]
+    
+    if filtro == "family":
+        query += " AND inventory.is_family = 1"
     if categoria:
         query += " AND cards.category = ?"
         params.append(categoria)
@@ -916,7 +979,7 @@ async def agencia(interaction: discord.Interaction, categoria: Optional[str] = N
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="time", description="Escolha sua facção.")
-@app_commands.choices(tag=[app_commands.Choice(name=t, value=t) for t in ["Nova Ordem", "Ascendentes", "Vigilantes", "Esquadrão Solar", "Idols", "Civis", "NPCs"]])
+@app_commands.choices(tag=[app_commands.Choice(name=t, value=t) for t in ["Nova Ordem", "Ascendentes", "Vigilantes", "Esquadrão Solar", "Idols", "NPCs", "Civis"]])
 async def time(interaction: discord.Interaction, tag: app_commands.Choice[str]):
     conn = sqlite3.connect('the_boys_bot.db')
     c = conn.cursor()
@@ -972,6 +1035,59 @@ async def editar_carta(interaction: discord.Interaction, codigo: int, nome: Opti
     conn.commit()
     conn.close()
     await interaction.response.send_message(f"✅ Carta #{codigo} editada!")
+
+@bot.tree.command(name="add_carta", description="[ADMIN] Adiciona uma carta comum ao sistema.")
+@app_commands.choices(tag=[app_commands.Choice(name=t, value=t) for t in ["Nova Ordem", "Ascendentes", "Vigilantes", "Esquadrão Solar", "Idols", "NPCs", "Civis"]])
+async def add_carta(interaction: discord.Interaction, nome: str, tag: app_commands.Choice[str], url: str):
+    if not interaction.user.guild_permissions.administrator: return
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO cards (name, category, tag, image_url) VALUES (?, 'Normal', ?, ?)", (nome, tag.value, url))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ Carta **{nome}** adicionada ao time **{tag.value}**!")
+
+@bot.tree.command(name="rem_carta", description="[ADMIN] Remove uma carta do sistema.")
+async def rem_carta(interaction: discord.Interaction, codigo: int):
+    if not interaction.user.guild_permissions.administrator: return
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("DELETE FROM cards WHERE id = ?", (codigo,))
+    c.execute("DELETE FROM inventory WHERE card_id = ?", (codigo,))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"🗑️ Carta #{codigo} removida de todo o sistema.")
+
+@bot.tree.command(name="rem_shopping", description="[ADMIN] Remove um item da loja.")
+async def rem_shopping(interaction: discord.Interaction, item_id: str):
+    if not interaction.user.guild_permissions.administrator: return
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("DELETE FROM shop WHERE item_id = ?", (item_id,))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"🗑️ Item {item_id} removido da loja.")
+
+@bot.tree.command(name="add_c_comemorativa", description="[ADMIN] Adiciona uma carta comemorativa.")
+async def add_c_comemorativa(interaction: discord.Interaction, codigo: int, nome: str, url: str):
+    if not interaction.user.guild_permissions.administrator: return
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO cards (id, name, category, tag, image_url) VALUES (?, ?, 'Comemorativa', 'Comemorativa', ?)", (codigo, nome, url))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"🎉 Carta Comemorativa **{nome}** (ID #{codigo}) adicionada!")
+
+@bot.tree.command(name="add_aesthetic", description="[ADMIN] Adiciona um aesthetic ao sistema.")
+async def add_aesthetic(interaction: discord.Interaction, codigo: str, nome: str, emojis: str, preco: int):
+    if not interaction.user.guild_permissions.administrator: return
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO aesthetics (id, name, emojis) VALUES (?, ?, ?)", (codigo, nome, emojis))
+    c.execute("INSERT OR REPLACE INTO shop (item_type, item_id, name, price) VALUES ('aesthetic', ?, ?, ?)", (codigo, nome, preco))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✨ Aesthetic **{nome}** adicionado à loja!")
 
 @bot.tree.command(name="add_c_especial", description="[ADMIN] Adiciona carta especial.")
 async def add_c_especial(interaction: discord.Interaction, nome: str, url: str):
