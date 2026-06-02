@@ -190,6 +190,21 @@ def get_aesthetic_emojis(aesthetic_id):
         return row[0].split(',')
     return ['👤','📊','🏆','🏢','⭐','💰']
 
+def get_ranking_pos(user_id):
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT users.discord_id, SUM(inventory.amount) as total 
+                 FROM users 
+                 LEFT JOIN inventory ON users.discord_id = inventory.user_id 
+                 GROUP BY users.discord_id 
+                 ORDER BY total DESC''')
+    rows = c.fetchall()
+    conn.close()
+    for idx, row in enumerate(rows):
+        if row[0] == user_id:
+            return idx + 1
+    return "N/A"
+
 # --- COMANDOS DE ECONOMIA ---
 
 @bot.tree.command(name="salario", description="Receba seu salário diário de $200.")
@@ -856,39 +871,137 @@ async def criar_duo(interaction: discord.Interaction, carta_a: int, carta_b: int
     conn.close()
     await interaction.response.send_message(f"💎 Duo **{nome_duo}** criado com sucesso! (ID #{result_id})")
 
+@bot.tree.command(name="agencia", description="Veja seu inventário de cartas.")
+async def agencia(interaction: discord.Interaction, categoria: Optional[str] = None, time: Optional[str] = None):
+    user_id = interaction.user.id
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    query = '''SELECT cards.id, cards.name, inventory.amount, inventory.level, cards.tag 
+               FROM inventory 
+               JOIN cards ON inventory.card_id = cards.id 
+               WHERE inventory.user_id = ?'''
+    params = [user_id]
+    if categoria:
+        query += " AND cards.category = ?"
+        params.append(categoria)
+    if time:
+        query += " AND cards.tag = ?"
+        params.append(time)
+    
+    c.execute(query, tuple(params))
+    items = c.fetchall()
+    conn.close()
+    
+    if not items:
+        return await interaction.response.send_message("📂 Sua agência está vazia!", ephemeral=True)
+    
+    level_map = {0: "", 1: "⭐", 2: "⭐⭐", 3: "⭐⭐⭐", 4: "👑"}
+    desc = "\n".join([f"`#{i[0]}` **{i[1]}** {level_map[i[3]]} — x{i[2]} ({i[4]})" for i in items])
+    embed = discord.Embed(title=f"📂 Agência de {interaction.user.name}", description=desc[:4000], color=discord.Color.green())
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="time", description="Escolha sua facção.")
+@app_commands.choices(tag=[app_commands.Choice(name=t, value=t) for t in ["Nova Ordem", "Ascendentes", "Vigilantes", "Esquadrão Solar", "Idols", "NPCs"]])
+async def time(interaction: discord.Interaction, tag: app_commands.Choice[str]):
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("UPDATE users SET team = ? WHERE discord_id = ?", (tag.value, interaction.user.id))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ Time definido: **{tag.value}**")
+
+@bot.tree.command(name="teamo", description="Define sua carta favorita.")
+async def teamo(interaction: discord.Interaction, codigo: int):
+    user_id = interaction.user.id
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("SELECT id FROM inventory WHERE user_id = ? AND card_id = ?", (user_id, codigo))
+    if not c.fetchone():
+        conn.close()
+        return await interaction.response.send_message("❌ Você não possui esta carta!", ephemeral=True)
+    c.execute("UPDATE users SET favorite_card_id = ? WHERE discord_id = ?", (codigo, user_id))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"❤️ Favorito definido!")
+
+@bot.tree.command(name="executar", description="Descarta uma carta do seu inventário.")
+async def executar(interaction: discord.Interaction, codigo: int):
+    user_id = interaction.user.id
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("SELECT id, amount FROM inventory WHERE user_id = ? AND card_id = ? LIMIT 1", (user_id, codigo))
+    item = c.fetchone()
+    if not item:
+        conn.close()
+        return await interaction.response.send_message("❌ Carta não encontrada!", ephemeral=True)
+    
+    if item[1] > 1:
+        c.execute("UPDATE inventory SET amount = amount - 1 WHERE id = ?", (item[0],))
+    else:
+        c.execute("DELETE FROM inventory WHERE id = ?", (item[0],))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"💀 Carta #{codigo} executada com sucesso.")
+
+@bot.tree.command(name="chutar", description="Chuta um usuário.")
+async def chutar(interaction: discord.Interaction, membro: discord.Member):
+    await interaction.response.send_message(f"👟 {interaction.user.mention} deu um chute em {membro.mention}!")
+
+@bot.tree.command(name="editar_carta", description="[ADMIN] Edita uma carta existente.")
+async def editar_carta(interaction: discord.Interaction, codigo: int, nome: Optional[str] = None, url: Optional[str] = None):
+    if not interaction.user.guild_permissions.administrator: return
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    if nome: c.execute("UPDATE cards SET name = ? WHERE id = ?", (nome, codigo))
+    if url: c.execute("UPDATE cards SET image_url = ? WHERE id = ?", (url, codigo))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ Carta #{codigo} editada!")
+
+@bot.tree.command(name="add_c_especial", description="[ADMIN] Adiciona carta especial.")
+async def add_c_especial(interaction: discord.Interaction, nome: str, url: str):
+    if not interaction.user.guild_permissions.administrator: return
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO cards (name, category, tag, image_url) VALUES (?, 'Especial', 'Especial', ?)", (nome, url))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"🌟 Carta Especial **{nome}** adicionada!")
+
+@bot.tree.command(name="add_moldura", description="[ADMIN] Adiciona uma moldura.")
+async def add_moldura(interaction: discord.Interaction, codigo: int, nome: str, url: str, preco: int):
+    if not interaction.user.guild_permissions.administrator: return
+    conn = sqlite3.connect('the_boys_bot.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO frames (id, name, image_url) VALUES (?, ?, ?)", (codigo, nome, url))
+    c.execute("INSERT INTO shop (item_type, item_id, name, price) VALUES ('frame', ?, ?, ?)", (str(codigo), nome, preco))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"🖼️ Moldura **{nome}** adicionada!")
+
 @bot.tree.command(name="combinar", description="Combine duas cartas para formar um Duo/Casal.")
 async def combinar(interaction: discord.Interaction, carta_a: int, carta_b: int):
     user_id = interaction.user.id
     conn = sqlite3.connect('the_boys_bot.db')
     c = conn.cursor()
-    
-    # Verificar receita (em qualquer ordem)
     c.execute("SELECT result_card_id FROM recipes WHERE (card_a_id = ? AND card_b_id = ?) OR (card_a_id = ? AND card_b_id = ?)", (carta_a, carta_b, carta_b, carta_a))
     recipe = c.fetchone()
-    
     if not recipe:
         conn.close()
         return await interaction.response.send_message("❌ Essas cartas não formam um Duo!", ephemeral=True)
-    
-    # Verificar posse
     c.execute("SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?", (user_id, carta_a))
     inv_a = c.fetchone()
     c.execute("SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?", (user_id, carta_b))
     inv_b = c.fetchone()
-    
     if not inv_a or not inv_b:
         conn.close()
         return await interaction.response.send_message("❌ Você não possui as cartas necessárias!", ephemeral=True)
-    
-    # Processar combinação
     c.execute("UPDATE inventory SET amount = amount - 1 WHERE user_id = ? AND card_id = ?", (user_id, carta_a))
     c.execute("UPDATE inventory SET amount = amount - 1 WHERE user_id = ? AND card_id = ?", (user_id, carta_b))
     c.execute("INSERT INTO inventory (user_id, card_id, amount, level) VALUES (?, ?, 1, 0) ON CONFLICT(user_id, card_id, level) DO UPDATE SET amount = amount + 1", (user_id, recipe[0]))
     c.execute("DELETE FROM inventory WHERE amount <= 0")
-    
     c.execute("SELECT name FROM cards WHERE id = ?", (recipe[0],))
     duo_name = c.fetchone()[0]
-    
     conn.commit()
     conn.close()
     await interaction.response.send_message(f"✨ **Fusão Completa!** Você obteve a carta Duo: **{duo_name}**!")
