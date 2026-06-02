@@ -90,12 +90,6 @@ def init_db():
                   name TEXT,
                   price INTEGER)''')
 
-    # Estética (Aesthetics)
-    c.execute('''CREATE TABLE IF NOT EXISTS aesthetics 
-                 (id TEXT PRIMARY KEY, 
-                  name TEXT, 
-                  emojis TEXT)''') # Formato: emoji1,emoji2,emoji3...
-
     # Molduras (Frames)
     c.execute('''CREATE TABLE IF NOT EXISTS frames 
                  (id INTEGER PRIMARY KEY, 
@@ -107,23 +101,12 @@ def init_db():
                  (card_a_id INTEGER, 
                   card_b_id INTEGER, 
                   result_card_id INTEGER)''')
-    
-    # Inventário de Cosméticos (Aesthetics/Frames comprados)
+
+    # Inventário de Cosméticos (Frames comprados)
     c.execute('''CREATE TABLE IF NOT EXISTS user_cosmetics 
                  (user_id INTEGER, 
                   item_type TEXT, 
                   item_id TEXT)''')
-
-    # Inserir Estéticas Iniciais
-    aesthetics_data = [
-        ('soft', 'Soft', '💭,🍨,🍰,🎀,✨️,🧸'),
-        ('dark', 'Dark', '🩸,🕯️,🦇,🍷,🖤,🕸️'),
-        ('cottage', 'Cottage', '🌳,📚,👒,🌷,🌷,🧺'),
-        ('sweet', 'Sweet', ' waffle,🍩,🍮,🍨,🍫,🍯'),
-        ('zoo', 'Zoo', '🐶,🐰,🐱,🐹,🐻,🦊'),
-        ('default', 'Padrão', '👤,📊,🏆,🏢,⭐,💰')
-    ]
-    c.executemany("INSERT OR IGNORE INTO aesthetics (id, name, emojis) VALUES (?, ?, ?)", aesthetics_data)
 
     conn.commit()
     conn.close()
@@ -235,14 +218,7 @@ async def get_card_image_with_frame(card_url, frame_url):
     return output
 
 # --- CORES E EMOJIS ---
-def get_aesthetic_emojis(aesthetic_id):
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    c.execute("SELECT emojis FROM aesthetics WHERE id = ?", (aesthetic_id,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return row[0].split(',')
+def get_aesthetic_emojis():
     return ['👤','📊','🏆','🏢','⭐','💰']
 
 def get_ranking_pos(user_id):
@@ -325,9 +301,7 @@ async def carreira(interaction: discord.Interaction, membro: Optional[discord.Me
     user_data = get_user_db(target.id)
     
     # Emojis do Aesthetic
-    # O índice 14 corresponde à coluna aesthetic_id na tabela users
-    aesthetic_id = user_data[14] if len(user_data) > 14 else 'default'
-    emojis = get_aesthetic_emojis(aesthetic_id or 'default')
+    emojis = get_aesthetic_emojis()
     
     conn = sqlite3.connect('the_boys_bot.db')
     c = conn.cursor()
@@ -766,22 +740,7 @@ async def comprar(interaction: discord.Interaction, item_id: str):
     conn.close()
     await interaction.response.send_message(f"✅ Você comprou **{item[3]}** com sucesso!")
 
-@bot.tree.command(name="setemoji", description="Define o aesthetic do seu perfil.")
-async def setemoji(interaction: discord.Interaction, aesthetic_id: str):
-    user_id = interaction.user.id
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    
-    # Verificar se possui
-    c.execute("SELECT * FROM user_cosmetics WHERE user_id = ? AND item_id = ?", (user_id, aesthetic_id))
-    if not c.fetchone() and aesthetic_id != 'default':
-        conn.close()
-        return await interaction.response.send_message("❌ Você não possui este aesthetic!", ephemeral=True)
-    
-    c.execute("UPDATE users SET aesthetic_id = ? WHERE discord_id = ?", (aesthetic_id, user_id))
-    conn.commit()
-    conn.close()
-    await interaction.response.send_message(f"✅ Estética do perfil alterada!")
+
 
 @bot.tree.command(name="enfeitar", description="Adiciona uma moldura em uma carta.")
 async def enfeitar(interaction: discord.Interaction, codigo_moldura: str, codigo_carta: int):
@@ -1106,16 +1065,7 @@ async def add_c_comemorativa(interaction: discord.Interaction, codigo: int, nome
     conn.close()
     await interaction.response.send_message(f"🎉 Carta Comemorativa **{nome}** (ID #{codigo}) adicionada!")
 
-@bot.tree.command(name="add_aesthetic", description="[ADMIN] Adiciona um aesthetic ao sistema.")
-async def add_aesthetic(interaction: discord.Interaction, codigo: str, nome: str, emojis: str, preco: int):
-    if not interaction.user.guild_permissions.administrator: return
-    conn = sqlite3.connect('the_boys_bot.db')
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO aesthetics (id, name, emojis) VALUES (?, ?, ?)", (codigo, nome, emojis))
-    c.execute("INSERT OR REPLACE INTO shop (item_type, item_id, name, price) VALUES ('aesthetic', ?, ?, ?)", (codigo, nome, preco))
-    conn.commit()
-    conn.close()
-    await interaction.response.send_message(f"✨ Aesthetic **{nome}** adicionado à loja!")
+
 
 @bot.tree.command(name="add_c_especial", description="[ADMIN] Adiciona carta especial.")
 async def add_c_especial(interaction: discord.Interaction, nome: str, url: str):
