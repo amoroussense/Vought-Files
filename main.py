@@ -71,9 +71,16 @@ def init_db():
                   amount INTEGER DEFAULT 1,
                   level INTEGER DEFAULT 0, -- 0: Normal, 1: 1 Estrela, 2: 2 Estrelas, 3: 3 Estrelas, 4: Coroada
                   frame_id INTEGER,
+                  card_wins INTEGER DEFAULT 0,
                   UNIQUE(user_id, card_id, level),
                   FOREIGN KEY(user_id) REFERENCES users(discord_id),
                   FOREIGN KEY(card_id) REFERENCES cards(id))''')
+    
+    # Tentar adicionar a coluna card_wins caso a tabela já exista
+    try:
+        c.execute("ALTER TABLE inventory ADD COLUMN card_wins INTEGER DEFAULT 0")
+    except:
+        pass
 
     # Loja (Shopping)
     c.execute('''CREATE TABLE IF NOT EXISTS shop 
@@ -112,7 +119,7 @@ def init_db():
         ('soft', 'Soft', '💭,🍨,🍰,🎀,✨️,🧸'),
         ('dark', 'Dark', '🩸,🕯️,🦇,🍷,🖤,🕸️'),
         ('cottage', 'Cottage', '🌳,📚,👒,🌷,🌷,🧺'),
-        ('sweet', 'Sweet', ' 🍭,🍩,🍮,🍨,🍫,🍯'),
+        ('sweet', 'Sweet', ' waffle,🍩,🍮,🍨,🍫,🍯'),
         ('zoo', 'Zoo', '🐶,🐰,🐱,🐹,🐻,🦊'),
         ('default', 'Padrão', '👤,📊,🏆,🏢,⭐,💰')
     ]
@@ -125,24 +132,70 @@ init_db()
 
 # --- CLASSES E UTILITÁRIOS ---
 
+class BattleModal(discord.ui.Modal, title="Escolha sua Carta para a Batalha"):
+    card_id = discord.ui.TextInput(label="ID da Carta", placeholder="Digite o código da carta que deseja usar...", required=True)
+    def __init__(self, target, challenger, challenger_card_id, challenger_level):
+        super().__init__()
+        self.target = target
+        self.challenger = challenger
+        self.challenger_card_id = challenger_card_id
+        self.challenger_level = challenger_level
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            op_card_id = int(self.card_id.value)
+        except ValueError:
+            return await interaction.response.send_message("❌ ID inválido!", ephemeral=True)
+
+        conn = sqlite3.connect('the_boys_bot.db')
+        c = conn.cursor()
+        c.execute("SELECT level FROM inventory WHERE user_id = ? AND card_id = ? ORDER BY level DESC LIMIT 1", (self.target.id, op_card_id))
+        row = c.fetchone()
+        
+        if not row:
+            conn.close()
+            return await interaction.response.send_message("❌ Você não possui esta carta!", ephemeral=True)
+        
+        op_level = row[0]
+        power_map = {0: 10, 1: 25, 2: 50, 3: 100, 4: 200}
+        user_power = random.randint(1, power_map[self.challenger_level])
+        op_power = random.randint(1, power_map[op_level])
+        
+        vencedor = self.challenger if user_power >= op_power else self.target
+        c.execute("UPDATE users SET wins = wins + 1 WHERE discord_id = ?", (vencedor.id,))
+        
+        if vencedor == self.challenger:
+            c.execute("UPDATE inventory SET card_wins = card_wins + 1 WHERE user_id = ? AND card_id = ? AND level = ?", (self.challenger.id, self.challenger_card_id, self.challenger_level))
+        else:
+            c.execute("UPDATE inventory SET card_wins = card_wins + 1 WHERE user_id = ? AND card_id = ? AND level = ?", (self.target.id, op_card_id, op_level))
+        
+        conn.commit()
+        conn.close()
+        
+        await interaction.response.send_message(f"🥊 **Fim da Batalha!**\n{self.challenger.name} ({user_power} pts) vs {self.target.name} ({op_power} pts)\n🏆 Vencedor: **{vencedor.mention}**!")
+
 class ConfirmInteraction(discord.ui.View):
-    def __init__(self, target, challenger, timeout=60):
+    def __init__(self, target, challenger, challenger_card_id=None, challenger_level=None, timeout=60):
         super().__init__(timeout=timeout)
         self.target = target
         self.challenger = challenger
+        self.challenger_card_id = challenger_card_id
+        self.challenger_level = challenger_level
         self.value = None
+
     @discord.ui.button(label="Aceitar", style=discord.ButtonStyle.green)
     async def accept(self, interaction, button):
         if interaction.user != self.target: return
         self.value = True
         self.stop()
-        await interaction.response.defer()
+        await interaction.response.send_modal(BattleModal(self.target, self.challenger, self.challenger_card_id, self.challenger_level))
+
     @discord.ui.button(label="Recusar", style=discord.ButtonStyle.red)
     async def decline(self, interaction, button):
         if interaction.user != self.target: return
         self.value = False
         self.stop()
-        await interaction.response.defer()
+        await interaction.response.send_message("🏳️ O desafio foi recusado.")
 
 def get_user_db(user_id):
     conn = sqlite3.connect('the_boys_bot.db')
@@ -272,7 +325,9 @@ async def carreira(interaction: discord.Interaction, membro: Optional[discord.Me
     user_data = get_user_db(target.id)
     
     # Emojis do Aesthetic
-    emojis = get_aesthetic_emojis(user_data[14] or 'default')
+    # O índice 14 corresponde à coluna aesthetic_id na tabela users
+    aesthetic_id = user_data[14] if len(user_data) > 14 else 'default'
+    emojis = get_aesthetic_emojis(aesthetic_id or 'default')
     
     conn = sqlite3.connect('the_boys_bot.db')
     c = conn.cursor()
@@ -319,10 +374,12 @@ async def carreira(interaction: discord.Interaction, membro: Optional[discord.Me
         embed.set_image(url=user_data[11])
     
     # Carta Favorita Pequena (Thumbnail)
-    if user_data[2]: # favorite_card_id
-        c = sqlite3.connect('the_boys_bot.db').cursor()
+    if user_data and user_data[2]: # favorite_card_id
+        conn = sqlite3.connect('the_boys_bot.db')
+        c = conn.cursor()
         c.execute("SELECT image_url FROM cards WHERE id = ?", (user_data[2],))
         fav_img = c.fetchone()
+        conn.close()
         if fav_img:
             embed.set_thumbnail(url=fav_img[0])
     
@@ -446,7 +503,7 @@ async def admirar(interaction: discord.Interaction, codigo: int):
         conn.close()
         return await interaction.response.send_message("❌ Carta não encontrada!", ephemeral=True)
     
-    c.execute("SELECT amount, level FROM inventory WHERE user_id = ? AND card_id = ?", (interaction.user.id, codigo))
+    c.execute("SELECT amount, level, card_wins FROM inventory WHERE user_id = ? AND card_id = ?", (interaction.user.id, codigo))
     inv = c.fetchall()
     conn.close()
     
@@ -457,7 +514,7 @@ async def admirar(interaction: discord.Interaction, codigo: int):
     embed.add_field(name="Time", value=card[2], inline=True)
     
     if inv:
-        status = "\n".join([f"**{level_names[i[1]]}**: {i[0]} unidades" for i in inv])
+        status = "\n".join([f"**{level_names[i[1]]}**: {i[0]} unidades (⚔️ {i[2]} vitórias)" for i in inv])
         embed.add_field(name="No seu Inventário", value=status, inline=False)
         # Mostrar imagem evoluída se tiver a coroada
         has_coroada = any(i[1] == 4 for i in inv)
@@ -539,37 +596,8 @@ async def batalha(interaction: discord.Interaction, oponente: discord.Member, co
     user_level = row[0]
     conn.close()
 
-    view = ConfirmInteraction(oponente, interaction.user)
+    view = ConfirmInteraction(oponente, interaction.user, codigo_sua_carta, user_level)
     await interaction.response.send_message(f"⚔️ {oponente.mention}, você foi desafiado por {interaction.user.mention}! Aceita lutar?", view=view)
-    
-    await view.wait()
-    if view.value:
-        # Oponente escolhe a carta (simplificado: ele usa a melhor dele para o exemplo, ou podemos pedir o ID)
-        # Para este bot, vamos pedir que o oponente tenha ao menos uma carta.
-        conn = sqlite3.connect('the_boys_bot.db')
-        c = conn.cursor()
-        c.execute("SELECT level FROM inventory WHERE user_id = ? ORDER BY level DESC LIMIT 1", (oponente.id,))
-        op_row = c.fetchone()
-        
-        if not op_row:
-            conn.close()
-            return await interaction.followup.send(f"❌ {oponente.name} não possui cartas para lutar!")
-        
-        op_level = op_row[0]
-        
-        # Lógica de Força: Normal(10), 1*(25), 2*(50), 3*(100), Coroada(200)
-        power_map = {0: 10, 1: 25, 2: 50, 3: 100, 4: 200}
-        user_power = random.randint(1, power_map[user_level])
-        op_power = random.randint(1, power_map[op_level])
-        
-        vencedor = interaction.user if user_power >= op_power else oponente
-        c.execute("UPDATE users SET wins = wins + 1 WHERE discord_id = ?", (vencedor.id,))
-        conn.commit()
-        conn.close()
-        
-        await interaction.followup.send(f"🥊 **Fim da Batalha!**\n{interaction.user.name} ({user_power} pts) vs {oponente.name} ({op_power} pts)\n🏆 Vencedor: **{vencedor.mention}**!")
-    else:
-        await interaction.followup.send("🏳️ O desafio foi recusado.")
 
 @bot.tree.command(name="casar", description="Case-se com um usuário ou uma carta.")
 @app_commands.choices(tipo=[app_commands.Choice(name="Usuário", value="user"), app_commands.Choice(name="Carta", value="card")])
@@ -1136,6 +1164,12 @@ async def combinar(interaction: discord.Interaction, carta_a: int, carta_b: int)
     conn.commit()
     conn.close()
     await interaction.response.send_message(f"✨ **Fusão Completa!** Você obteve a carta Duo: **{duo_name}**!")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def sync(ctx):
+    await bot.tree.sync()
+    await ctx.send("✅ Comandos Slash sincronizados com sucesso!")
 
 @bot.event
 async def on_ready():
